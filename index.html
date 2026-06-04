@@ -1,0 +1,1490 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QR Manager</title>
+<script>
+/* QRCode.js — version propre sans shadowing de variable */
+(function(){
+  // Niveaux de correction d'erreur
+  var ErrorCorrectLevel = {L:1, M:0, Q:3, H:2};
+
+  // Utilitaires GF(256)
+  var GF = {
+    EXP: new Array(256), LOG: new Array(256)
+  };
+  for(var i=0;i<8;i++) GF.EXP[i]=1<<i;
+  for(var i=8;i<256;i++) GF.EXP[i]=GF.EXP[i-4]^GF.EXP[i-5]^GF.EXP[i-6]^GF.EXP[i-8];
+  for(var i=0;i<255;i++) GF.LOG[GF.EXP[i]]=i;
+  GF.gexp=function(n){while(n<0)n+=255;while(n>=256)n-=255;return GF.EXP[n];};
+  GF.glog=function(n){if(n<1)throw new Error('glog('+n+')');return GF.LOG[n];};
+
+  // Polynôme
+  function Poly(num,shift){
+    this.num=new Array(num.length+shift);
+    for(var i=0;i<num.length;i++)this.num[i]=num[i];
+  }
+  Poly.prototype.get=function(i){return this.num[i];};
+  Poly.prototype.getLen=function(){return this.num.length;};
+  Poly.prototype.multiply=function(other){
+    var n=new Array(this.getLen()+other.getLen()-1);
+    for(var i=0;i<this.getLen();i++)
+      for(var j=0;j<other.getLen();j++)
+        n[i+j]^=GF.gexp(GF.glog(this.get(i))+GF.glog(other.get(j)));
+    return new Poly(n,0);
+  };
+  Poly.prototype.mod=function(other){
+    if(this.getLen()-other.getLen()<0)return this;
+    var r=GF.glog(this.get(0))-GF.glog(other.get(0));
+    var n=new Array(this.getLen());
+    for(var i=0;i<this.getLen();i++)n[i]=this.get(i);
+    for(var i=0;i<other.getLen();i++)n[i]^=GF.gexp(GF.glog(other.get(i))+r);
+    return new Poly(n,0).mod(other);
+  };
+
+  // Données 8-bit
+  function Data8Bit(data){
+    this.mode=4; // MODE_8BIT_BYTE
+    this.data=data;
+    this.parsedData=[];
+    for(var i=0;i<data.length;i++){
+      var c=data.charCodeAt(i);
+      if(c>65536){this.parsedData.push(240|((1835008&c)>>18),128|((258048&c)>>12),128|((4032&c)>>6),128|(63&c));}
+      else if(c>2048){this.parsedData.push(224|((61440&c)>>12),128|((4032&c)>>6),128|(63&c));}
+      else if(c>128){this.parsedData.push(192|((1984&c)>>6),128|(63&c));}
+      else{this.parsedData.push(c);}
+    }
+    if(this.parsedData.length!=this.data.length){
+      this.parsedData.unshift(239,187,191);
+    }
+  }
+  Data8Bit.prototype.getLength=function(){return this.parsedData.length;};
+  Data8Bit.prototype.write=function(buf){for(var i=0;i<this.parsedData.length;i++)buf.put(this.parsedData[i],8);};
+
+  // BitBuffer
+  function BitBuffer(){this.buffer=[];this.length=0;}
+  BitBuffer.prototype.get=function(i){return 1==((this.buffer[Math.floor(i/8)]>>>(7-i%8))&1);};
+  BitBuffer.prototype.put=function(n,l){for(var i=0;i<l;i++)this.putBit(1==((n>>>(l-i-1))&1));};
+  BitBuffer.prototype.getLengthInBits=function(){return this.length;};
+  BitBuffer.prototype.putBit=function(b){var p=Math.floor(this.length/8);if(this.buffer.length<=p)this.buffer.push(0);if(b)this.buffer[p]|=128>>>(this.length%8);this.length++;};
+
+  // RSBlock
+  var RS_BLOCK_TABLE=[[1,26,19],[1,26,16],[1,26,13],[1,26,9],[1,44,34],[1,44,28],[1,44,22],[1,44,16],[1,70,55],[1,70,44],[2,35,17],[2,35,13],[1,100,80],[2,50,32],[2,50,24],[4,25,9],[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12],[2,86,68],[4,43,27],[4,43,19],[4,43,15],[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14],[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15],[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13],[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16],[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13],[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15],[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12],[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13],[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12],[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16],[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15],[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15],[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14],[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16],[4,144,116,4,145,117],[17,68,42],[17,50,22,6,51,23],[19,46,16,6,47,17],[2,139,111,7,140,112],[17,74,46],[7,54,24,16,55,25],[34,37,13],[4,151,121,5,152,122],[4,75,47,14,76,48],[11,54,24,14,55,25],[16,45,15,14,46,16],[6,147,117,4,148,118],[6,73,45,14,74,46],[11,54,24,16,55,25],[30,46,16,2,47,17],[8,132,106,4,133,107],[8,75,47,13,76,48],[7,54,24,22,55,25],[22,45,15,13,46,16],[10,142,114,2,143,115],[19,74,46,4,75,47],[28,50,22,6,51,23],[33,46,16,4,47,17],[8,152,122,4,153,123],[22,73,45,3,74,46],[8,53,23,26,54,24],[12,45,15,28,46,16],[3,147,117,10,148,118],[3,73,45,23,74,46],[4,54,24,31,55,25],[11,45,15,31,46,16],[7,146,116,7,147,117],[21,73,45,7,74,46],[1,53,23,37,54,24],[19,45,15,26,46,16],[5,145,115,10,146,116],[19,75,47,10,76,48],[15,54,24,25,55,25],[23,45,15,25,46,16],[13,145,115,3,146,116],[2,74,46,29,75,47],[42,54,24,1,55,25],[23,45,15,28,46,16],[17,145,115],[10,74,46,23,75,47],[10,54,24,35,55,25],[19,45,15,35,46,16],[17,145,115,1,146,116],[14,74,46,21,75,47],[29,54,24,19,55,25],[11,45,15,46,46,16],[13,145,115,6,146,116],[14,74,46,23,75,47],[44,54,24,7,55,25],[59,46,16,1,47,17],[12,151,121,7,152,122],[12,75,47,26,76,48],[39,54,24,14,55,25],[22,45,15,41,46,16],[6,151,121,14,152,122],[6,75,47,34,76,48],[46,54,24,10,55,25],[2,45,15,64,46,16],[17,152,122,4,153,123],[29,74,46,14,75,47],[49,54,24,10,55,25],[24,45,15,46,46,16],[4,152,122,18,153,123],[13,74,46,32,75,47],[48,54,24,14,55,25],[42,45,15,32,46,16],[20,147,117,4,148,118],[40,75,47,7,76,48],[43,54,24,22,55,25],[10,45,15,67,46,16],[19,148,118,6,149,119],[18,75,47,31,76,48],[34,54,24,34,55,25],[20,45,15,61,46,16]];
+  function getRSBlocks(typeNum,ecLevel){
+    var t=RS_BLOCK_TABLE[(typeNum-1)*4+[1,0,3,2][ecLevel-1]];
+    if(!t)throw new Error('bad rs block');
+    var blocks=[];
+    for(var i=0;i<t.length;i+=3)
+      for(var j=0;j<t[i];j++)
+        blocks.push({totalCount:t[i+1],dataCount:t[i+2]});
+    return blocks;
+  }
+  function getLengthInBits(mode,type){
+    if(type>=1&&type<=9)return 8;
+    if(type<=26)return 16;
+    return 16;
+  }
+  function createBytes(buf,rsBlocks){
+    var offset=0,maxDcCount=0,maxEcCount=0;
+    var dcdata=new Array(rsBlocks.length),ecdata=new Array(rsBlocks.length);
+    for(var r=0;r<rsBlocks.length;r++){
+      var dcCount=rsBlocks[r].dataCount,ecCount=rsBlocks[r].totalCount-dcCount;
+      maxDcCount=Math.max(maxDcCount,dcCount);
+      maxEcCount=Math.max(maxEcCount,ecCount);
+      dcdata[r]=new Array(dcCount);
+      for(var i=0;i<dcdata[r].length;i++)dcdata[r][i]=255&buf.buffer[offset++];
+      var rsP=new Poly([1],0);
+      for(var i=0;i<ecCount;i++)rsP=rsP.multiply(new Poly([1,GF.gexp(i)],0));
+      var modP=new Poly(dcdata[r],ecCount).mod(rsP);
+      ecdata[r]=new Array(ecCount);
+      for(var i=0;i<ecdata[r].length;i++)ecdata[r][i]=modP.get(i-(rsP.getLen()-1-ecdata[r].length));
+    }
+    var totalCodeCount=0;
+    for(var r=0;r<rsBlocks.length;r++)totalCodeCount+=rsBlocks[r].totalCount;
+    var data=new Array(totalCodeCount),index=0;
+    for(var i=0;i<maxDcCount;i++)for(var r=0;r<rsBlocks.length;r++)if(i<dcdata[r].length)data[index++]=dcdata[r][i];
+    for(var i=0;i<maxEcCount;i++)for(var r=0;r<rsBlocks.length;r++)if(i<ecdata[r].length)data[index++]=ecdata[r][i];
+    return data;
+  }
+
+  // Modèle QR
+  var PATTERN_POS=[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,134],[6,34,60,86,112,138],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]];
+
+  function getBCHDigit(n){var d=0;while(n!=0){d++;n>>>=1;}return d;}
+  function getBCHTypeInfo(data){var b=data<<10;while(getBCHDigit(b)-getBCHDigit(1335)>=0)b^=1335<<(getBCHDigit(b)-getBCHDigit(1335));return 21522^(data<<10|b);}
+
+  function QRModel(typeNumber,ecLevel){
+    this.typeNumber=typeNumber;
+    this.errorCorrectLevel=ecLevel;
+    this.modules=null;
+    this.moduleCount=0;
+    this.dataCache=null;
+    this.dataList=[];
+  }
+  QRModel.prototype.addData=function(data){this.dataList.push(new Data8Bit(data));this.dataCache=null;};
+  QRModel.prototype.isDark=function(r,c){if(r<0||this.moduleCount<=r||c<0||this.moduleCount<=c)throw new Error(r+','+c);return this.modules[r][c];};
+  QRModel.prototype.getModuleCount=function(){return this.moduleCount;};
+  QRModel.prototype.make=function(){this.makeImpl(false,this.getBestMaskPattern());};
+  QRModel.prototype.makeImpl=function(test,maskPattern){
+    this.moduleCount=4*this.typeNumber+17;
+    this.modules=[];
+    for(var i=0;i<this.moduleCount;i++){this.modules[i]=[];for(var j=0;j<this.moduleCount;j++)this.modules[i][j]=null;}
+    this.setupPositionProbePattern(0,0);
+    this.setupPositionProbePattern(this.moduleCount-7,0);
+    this.setupPositionProbePattern(0,this.moduleCount-7);
+    this.setupPositionAdjustPattern();
+    this.setupTimingPattern();
+    this.setupTypeInfo(test,maskPattern);
+    if(this.typeNumber>=7)this.setupTypeNumber(test);
+    if(this.dataCache==null)this.dataCache=this.createData();
+    this.mapData(this.dataCache,maskPattern);
+  };
+  QRModel.prototype.setupPositionProbePattern=function(row,col){
+    for(var r=-1;r<=7;r++){if(r+row<0||this.moduleCount<=r+row)continue;for(var c=-1;c<=7;c++){if(c+col<0||this.moduleCount<=c+col)continue;this.modules[r+row][c+col]=(r>=0&&r<=6&&(c==0||c==6))||(c>=0&&c<=6&&(r==0||r==6))||(r>=2&&r<=4&&c>=2&&c<=4);}}
+  };
+  QRModel.prototype.getBestMaskPattern=function(){var min=0,pat=0;for(var i=0;i<8;i++){this.makeImpl(true,i);var l=this.getLostPoint();if(i==0||l<min){min=l;pat=i;}}return pat;};
+  QRModel.prototype.setupTimingPattern=function(){for(var i=8;i<this.moduleCount-8;i++){if(this.modules[i][6]==null)this.modules[i][6]=(i%2==0);if(this.modules[6][i]==null)this.modules[6][i]=(i%2==0);}};
+  QRModel.prototype.setupPositionAdjustPattern=function(){var pos=PATTERN_POS[this.typeNumber-1];for(var i=0;i<pos.length;i++)for(var j=0;j<pos.length;j++){var r=pos[i],c=pos[j];if(this.modules[r][c]!=null)continue;for(var ri=-2;ri<=2;ri++)for(var ci=-2;ci<=2;ci++)this.modules[r+ri][c+ci]=(ri==-2||ri==2||ci==-2||ci==2||(ri==0&&ci==0));}};
+  QRModel.prototype.setupTypeNumber=function(test){var bits=0;var n=this.typeNumber<<12;while(getBCHDigit(n)-getBCHDigit(7973)>=0)n^=7973<<(getBCHDigit(n)-getBCHDigit(7973));bits=this.typeNumber<<12|n;for(var i=0;i<18;i++){var b=!test&&((bits>>i)&1)==1;this.modules[Math.floor(i/3)][i%3+this.moduleCount-8-3]=b;this.modules[i%3+this.moduleCount-8-3][Math.floor(i/3)]=b;}};
+  QRModel.prototype.setupTypeInfo=function(test,maskPattern){var data=(this.errorCorrectLevel<<3)|maskPattern,bits=getBCHTypeInfo(data);for(var i=0;i<15;i++){var b=!test&&((bits>>i)&1)==1;if(i<6)this.modules[i][8]=b;else if(i<8)this.modules[i+1][8]=b;else this.modules[this.moduleCount-15+i][8]=b;}for(var i=0;i<15;i++){var b=!test&&((bits>>i)&1)==1;if(i<8)this.modules[8][this.moduleCount-i-1]=b;else if(i<9)this.modules[8][15-i]=b;else this.modules[8][15-i-1]=b;}this.modules[this.moduleCount-8][8]=!test;};
+  QRModel.prototype.mapData=function(data,maskPattern){var inc=-1,row=this.moduleCount-1,bitIndex=7,byteIndex=0;for(var col=this.moduleCount-1;col>0;col-=2){if(col==6)col--;while(true){for(var c=0;c<2;c++){if(this.modules[row][col-c]==null){var dark=false;if(byteIndex<data.length)dark=((data[byteIndex]>>>bitIndex)&1)==1;var mask=false;switch(maskPattern){case 0:mask=(row+col-c)%2==0;break;case 1:mask=row%2==0;break;case 2:mask=(col-c)%3==0;break;case 3:mask=(row+col-c)%3==0;break;case 4:mask=(Math.floor(row/2)+Math.floor((col-c)/3))%2==0;break;case 5:mask=row*(col-c)%2+row*(col-c)%3==0;break;case 6:mask=(row*(col-c)%2+row*(col-c)%3)%2==0;break;case 7:mask=(row*(col-c)%3+(row+col-c)%2)%2==0;break;}if(mask)dark=!dark;this.modules[row][col-c]=dark;if(--bitIndex==-1){byteIndex++;bitIndex=7;}}}row+=inc;if(row<0||this.moduleCount<=row){row-=inc;inc=-inc;break;}}}};
+  QRModel.prototype.getLostPoint=function(){var n=this.moduleCount,lost=0;for(var r=0;r<n;r++){for(var c=0;c<n;c++){var cnt=0,dark=this.isDark(r,c);for(var rr=-1;rr<=1;rr++){if(r+rr<0||n<=r+rr)continue;for(var cc=-1;cc<=1;cc++){if(c+cc<0||n<=c+cc)continue;if(rr==0&&cc==0)continue;if(dark===this.isDark(r+rr,c+cc))cnt++;}}if(cnt>=5)lost+=3+cnt-5;}for(var c=0;c<n-1;c++){var cnt=0;if(this.isDark(r,c))cnt++;if(this.isDark(r+1<n?r+1:r,c))cnt++;if(this.isDark(r,c+1<n?c+1:c))cnt++;if(this.isDark(r+1<n?r+1:r,c+1<n?c+1:c))cnt++;if(cnt==0||cnt==4)lost+=3;}}return lost;};
+  QRModel.prototype.createData=function(){
+    var rsBlocks=getRSBlocks(this.typeNumber,this.errorCorrectLevel);
+    var buf=new BitBuffer();
+    for(var i=0;i<this.dataList.length;i++){var d=this.dataList[i];buf.put(d.mode,4);buf.put(d.getLength(),getLengthInBits(d.mode,this.typeNumber));d.write(buf);}
+    var totalDC=0;for(var i=0;i<rsBlocks.length;i++)totalDC+=rsBlocks[i].dataCount;
+    if(buf.getLengthInBits()>8*totalDC)throw new Error('overflow');
+    if(buf.getLengthInBits()+4<=8*totalDC)buf.put(0,4);
+    while(buf.getLengthInBits()%8!=0)buf.putBit(false);
+    while(true){if(buf.getLengthInBits()>=8*totalDC)break;buf.put(236,8);if(buf.getLengthInBits()>=8*totalDC)break;buf.put(17,8);}
+    return createBytes(buf,rsBlocks);
+  };
+
+  // Constructeur public QRCode — noms de variables sans collision
+  window.QRCode = function(el, opts){
+    if(typeof opts==='string') opts={text:opts};
+    opts = opts||{};
+    var width  = opts.width  || 200;
+    var height = opts.height || 200;
+    var text   = opts.text   || '';
+    var dark   = opts.colorDark  || '#000000';
+    var light  = opts.colorLight || '#ffffff';
+    var ecl    = opts.correctLevel || ErrorCorrectLevel.H;
+
+    var model = null;
+    for(var t=1;t<=40;t++){
+      try{
+        var m=new QRModel(t,ecl);
+        m.addData(text);
+        m.make();
+        model=m;
+        break;
+      }catch(e){}
+    }
+    if(!model) return;
+
+    var canvas=document.createElement('canvas');
+    canvas.width=width; canvas.height=height;
+    el.appendChild(canvas);
+    var ctx=canvas.getContext('2d');
+    var count=model.getModuleCount();
+    var tW=width/count, tH=height/count;
+    for(var r=0;r<count;r++){
+      for(var c=0;c<count;c++){
+        ctx.fillStyle=model.isDark(r,c)?dark:light;
+        var x=Math.round(c*tW), y=Math.round(r*tH);
+        ctx.fillRect(x,y,Math.ceil((c+1)*tW)-x,Math.ceil((r+1)*tH)-y);
+      }
+    }
+    this._canvas=canvas;
+  };
+  window.QRCode.CorrectLevel = ErrorCorrectLevel;
+})();
+</script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --green:#00b865;--green-light:#e8f7f0;--green-dark:#009952;
+  --sidebar-w:240px;--topbar-h:60px;
+  --bg:#f4f6f8;--white:#fff;--border:#e5e7eb;
+  --text:#1a1a1a;--sub:#6b7280;--danger:#dc2626;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh}
+
+/* ─── SIDEBAR ─────────────────────────────────────── */
+.sidebar{width:var(--sidebar-w);background:var(--white);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;height:100vh;z-index:50;overflow-y:auto}
+.sidebar-logo{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.logo-icon{width:36px;height:36px;background:var(--green);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.logo-text{font-size:14px;font-weight:700;line-height:1.2;color:var(--text)}
+.logo-text span{display:block;font-weight:400;color:var(--sub);font-size:11px}
+.sidebar-nav{padding:12px 0;flex:1}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;font-size:14px;color:var(--sub);cursor:pointer;transition:all .15s;border-left:3px solid transparent;text-decoration:none}
+.nav-item:hover{background:#f9fafb;color:var(--text)}
+.nav-item.active{background:var(--green-light);color:var(--green);border-left:3px solid var(--green);font-weight:500}
+.nav-item svg{width:18px;height:18px;flex-shrink:0}
+.sidebar-footer{padding:16px 20px;border-top:1px solid var(--border)}
+.sidebar-footer .nav-item{padding:8px 0;border-left:none}
+
+/* ─── MAIN ────────────────────────────────────────── */
+.main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;min-height:100vh}
+.page{display:none;padding:2rem}
+.page.active{display:block}
+
+/* ─── PAGE HEADER ─────────────────────────────────── */
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;flex-wrap:wrap;gap:10px}
+.page-header h1{font-size:22px;font-weight:700}
+.header-actions{display:flex;gap:10px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;transition:all .15s;border:none;text-decoration:none}
+.btn-outline{background:var(--white);border:1.5px solid var(--green);color:var(--green)}
+.btn-outline:hover{background:var(--green-light)}
+.btn-green{background:var(--green);color:#fff}
+.btn-green:hover{background:var(--green-dark)}
+.btn-gray{background:var(--white);border:1px solid var(--border);color:var(--text)}
+.btn-gray:hover{background:#f9fafb}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* ─── FOLDERS ─────────────────────────────────────── */
+.folders-title{font-size:14px;font-weight:600;color:var(--sub);margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px;font-size:12px}
+.folders-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:2rem}
+.folder-card{width:130px;border:1.5px solid var(--border);border-radius:10px;padding:14px;text-align:center;cursor:pointer;transition:all .15s;background:var(--white)}
+.folder-card:hover{border-color:var(--green);background:var(--green-light)}
+.folder-card.active-folder{border-color:var(--green);background:var(--green-light)}
+.folder-card .fc-icon{font-size:28px;margin-bottom:6px;color:var(--green)}
+.folder-card .fc-name{font-size:13px;font-weight:500;color:var(--text)}
+.folder-card .fc-count{font-size:11px;color:var(--sub);margin-top:2px}
+.folder-new .fc-icon{color:var(--green)}
+.folder-new .fc-name{color:var(--green)}
+
+/* ─── FILTERS BAR ─────────────────────────────────── */
+.filters-bar{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:1rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.filter-group{display:flex;flex-direction:column;gap:4px;min-width:140px}
+.filter-group label{font-size:11px;color:var(--sub);font-weight:500}
+.filter-group input,.filter-group select{padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;outline:none;background:var(--white);color:var(--text);transition:border-color .15s}
+.filter-group input:focus,.filter-group select:focus{border-color:var(--green)}
+.filter-search{flex:1;min-width:180px}
+.filter-search input{width:100%;padding-left:32px}
+.filter-search-wrap{position:relative}
+.filter-search-wrap svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--sub);width:14px;height:14px}
+
+/* ─── QR LIST ─────────────────────────────────────── */
+.qr-table-wrap{background:var(--white);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.qr-table-head{display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border);background:#f9fafb;font-size:12px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.5px;gap:0}
+.th-check{width:36px;flex-shrink:0}
+.th-qr{width:70px;flex-shrink:0}
+.th-name{flex:1;min-width:140px}
+.th-folder{width:150px;flex-shrink:0}
+.th-type{width:120px;flex-shrink:0}
+.th-date{width:110px;flex-shrink:0}
+.th-scans{width:80px;flex-shrink:0;text-align:center}
+.th-preview{width:70px;flex-shrink:0;text-align:center}
+.th-actions{width:200px;flex-shrink:0;text-align:right}
+
+.qr-row{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);transition:background .1s;gap:0}
+.qr-row:last-child{border-bottom:none}
+.qr-row:hover{background:#fafafa}
+.qr-row .th-check{width:36px;flex-shrink:0}
+.qr-row input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:var(--green)}
+.qr-row .th-qr{width:70px;flex-shrink:0}
+.qr-thumb{width:44px;height:44px;border:1px solid var(--border);border-radius:6px;object-fit:contain;background:#fff;cursor:pointer}
+.qr-thumb-empty{width:44px;height:44px;border:1px solid var(--border);border-radius:6px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:20px}
+.qr-row .th-name{flex:1;min-width:140px}
+.qr-name{font-size:14px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.qr-url{font-size:11px;color:var(--green);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;margin-top:2px;cursor:pointer;text-decoration:none}
+.qr-url:hover{text-decoration:underline}
+.qr-row .th-folder{width:150px;flex-shrink:0;font-size:13px;color:var(--sub);display:flex;align-items:center;gap:5px}
+.qr-row .th-type{width:120px;flex-shrink:0}
+.type-badge{display:inline-block;font-size:11px;padding:3px 8px;border-radius:20px;font-weight:500;background:var(--green-light);color:var(--green)}
+.qr-row .th-date{width:110px;flex-shrink:0;font-size:12px;color:var(--sub)}
+.qr-row .th-scans{width:80px;flex-shrink:0;text-align:center}
+.scan-count{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:var(--green-light);color:var(--green);font-size:13px;font-weight:600}
+.preview-thumb{width:44px;height:44px;border:1px solid var(--border);border-radius:6px;object-fit:cover;cursor:pointer;transition:transform .15s;background:#f3f4f6}
+.preview-thumb:hover{transform:scale(1.08);border-color:var(--green)}
+.preview-icon{width:44px;height:44px;border:1px solid var(--border);border-radius:6px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;transition:transform .15s}
+.preview-icon:hover{transform:scale(1.08);border-color:var(--green)}
+.qr-row .th-preview{width:70px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.qr-row .th-actions{width:200px;flex-shrink:0;display:flex;justify-content:flex-end;gap:6px}
+.act-btn{padding:6px 10px;border:1px solid var(--border);background:var(--white);border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;transition:all .15s}
+.act-btn:hover{border-color:var(--green);color:var(--green)}
+.act-btn.danger:hover{border-color:var(--danger);color:var(--danger)}
+.act-btn.primary{background:var(--green);border-color:var(--green);color:#fff}
+.act-btn.primary:hover{background:var(--green-dark)}
+
+.empty-list{padding:4rem 2rem;text-align:center;color:var(--sub)}
+.empty-list .ei{font-size:56px;margin-bottom:1rem}
+.empty-list h3{font-size:16px;font-weight:500;color:var(--text);margin-bottom:6px}
+.select-all-row{display:flex;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--border);background:#fafafa}
+.select-all-row label{font-size:13px;font-weight:500;cursor:pointer}
+
+/* ─── STATS PAGE ──────────────────────────────────── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;margin-bottom:2rem}
+.stat-card{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:1.2rem}
+.stat-card .sv{font-size:28px;font-weight:700;color:var(--green)}
+.stat-card .sl{font-size:13px;color:var(--sub);margin-top:4px}
+
+/* ─── SETTINGS PAGE ───────────────────────────────── */
+.settings-card{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:1.5rem;max-width:540px;margin-bottom:1rem}
+.settings-card h3{font-size:15px;font-weight:600;margin-bottom:1rem}
+.settings-row{margin-bottom:1rem}
+.settings-row label{display:block;font-size:13px;color:var(--sub);margin-bottom:5px;font-weight:500}
+.settings-row input{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:7px;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.settings-row input:focus{border-color:var(--green)}
+.settings-msg{font-size:12px;margin-top:6px}
+.settings-msg.ok{color:var(--green)}
+.settings-msg.err{color:var(--danger)}
+
+/* ─── MODAL ───────────────────────────────────────── */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;display:none;align-items:center;justify-content:center;padding:1rem}
+.modal-bg.open{display:flex}
+.modal{background:var(--white);border-radius:14px;width:100%;max-width:540px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.15)}
+.modal-head{padding:1.4rem 1.5rem 0;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:1rem}
+.modal-head h2{font-size:17px;font-weight:600}
+.modal-close{background:none;border:none;font-size:22px;cursor:pointer;color:var(--sub);line-height:1;padding:2px}
+.modal-body{padding:1.5rem}
+.m-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:1.5rem}
+.m-tab{padding:8px 18px;border:none;background:none;font-size:14px;color:var(--sub);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;transition:all .15s}
+.m-tab.active{color:var(--green);border-bottom:2px solid var(--green);font-weight:500}
+.form-group{margin-bottom:1.2rem}
+.form-group label{display:block;font-size:13px;color:var(--sub);margin-bottom:5px;font-weight:500}
+.form-group input,.form-group select{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:7px;font-size:14px;font-family:inherit;outline:none;transition:border-color .15s}
+.form-group input:focus,.form-group select:focus{border-color:var(--green)}
+.dropzone{border:2px dashed var(--border);border-radius:10px;padding:2rem;text-align:center;cursor:pointer;transition:all .15s}
+.dropzone:hover,.dropzone.over{border-color:var(--green);background:var(--green-light)}
+.dropzone .dz-icon{font-size:32px;margin-bottom:8px}
+.dropzone .dz-title{font-size:14px;font-weight:500;margin-bottom:3px}
+.dropzone .dz-sub{font-size:12px;color:var(--sub)}
+.file-selected{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#f9fafb;border-radius:8px;margin-top:8px}
+.fs-icon{font-size:20px}
+.fs-name{flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fs-rm{background:none;border:none;cursor:pointer;color:var(--sub);font-size:16px}
+.dur-row{display:flex;gap:8px}
+.dur-opt{flex:1;padding:9px 6px;border:1.5px solid var(--border);border-radius:8px;background:var(--white);font-size:13px;cursor:pointer;font-family:inherit;text-align:center;color:var(--sub);transition:all .15s}
+.dur-opt:hover{border-color:var(--green)}
+.dur-opt.active{border-color:var(--green);background:var(--green-light);color:var(--green);font-weight:500}
+.dur-opt .do{display:block;font-weight:600;font-size:14px}
+.dur-opt .ds{display:block;font-size:11px;opacity:.7;margin-top:1px}
+.prog-bar{height:4px;background:#e5e7eb;border-radius:4px;overflow:hidden;margin-top:1rem;display:none}
+.prog-fill{height:100%;background:var(--green);border-radius:4px;transition:width .4s;width:0}
+.m-status{font-size:13px;margin-top:8px;min-height:18px;color:var(--sub)}
+.m-status.err{color:var(--danger)}
+.modal-foot{display:flex;gap:8px;padding-top:1rem;border-top:1px solid var(--border);margin-top:1rem}
+.modal-foot .btn{flex:1;justify-content:center;padding:10px}
+
+/* ─── DETAIL MODAL ────────────────────────────────── */
+.detail-qr-wrap{background:#f9fafb;border-radius:10px;padding:1.5rem;text-align:center;margin-bottom:1rem}
+.detail-qr-wrap img{max-width:180px;max-height:180px;border:1px solid var(--border);border-radius:6px;background:#fff;padding:8px}
+.detail-row{display:flex;gap:8px;margin-bottom:6px;font-size:13px}
+.detail-row .lbl{color:var(--sub);min-width:110px;font-weight:500}
+.detail-row .val{color:var(--text);word-break:break-all}
+
+/* ─── QR RESULT (inside modal) ───────────────────── */
+.qr-result-wrap{text-align:center;padding:1rem;background:#f9fafb;border-radius:10px;margin-top:1rem}
+.qr-result-wrap .qr-inner{display:inline-block;background:#fff;padding:12px;border-radius:8px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
+.result-badges{display:flex;gap:6px;justify-content:center;margin-top:8px;flex-wrap:wrap}
+.rb{font-size:11px;padding:3px 10px;border-radius:20px;font-weight:500}
+.rb.green{background:var(--green-light);color:var(--green)}
+.rb.blue{background:#e3f2fd;color:#1565c0}
+.rb.orange{background:#fff3e0;color:#e65100}
+.result-note{font-size:11px;color:var(--sub);margin-top:8px}
+
+/* ─── VIEWER ──────────────────────────────────────── */
+.viewer-bg{position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column}
+.viewer-bg.open{display:flex}
+.viewer-bar{background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:space-between;padding:12px 16px;flex-shrink:0}
+.viewer-bar span{color:#fff;font-size:14px}
+.viewer-bar button{background:none;border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:13px;font-family:inherit}
+.viewer-body{flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:1rem}
+.viewer-body img{max-width:100%;max-height:100%;object-fit:contain}
+.viewer-body iframe{width:100%;height:100%;border:none;background:#fff}
+
+/* ─── RESPONSIVE ──────────────────────────────────── */
+@media(max-width:900px){
+  .th-folder,.th-date,.th-scans,.th-type,.th-preview{display:none}
+  .qr-row .th-folder,.qr-row .th-date,.qr-row .th-scans,.qr-row .th-type,.qr-row .th-preview{display:none}
+}
+@media(max-width:640px){
+  :root{--sidebar-w:0px}
+  .sidebar{display:none}
+  .main{margin-left:0}
+  .page{padding:1rem}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ SIDEBAR ═══════════════════════════════════════════════ -->
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-icon">🔲</div>
+    <div class="logo-text">QR Manager<span>Gratuit · Sans abonnement</span></div>
+  </div>
+  <nav class="sidebar-nav">
+    <a class="nav-item" onclick="showPage('create');return false;" href="javascript:void(0)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      Créer un code QR
+    </a>
+    <a class="nav-item active" onclick="showPage('mycodes');return false;" href="javascript:void(0)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+      Mes codes QR
+    </a>
+    <a class="nav-item" onclick="showPage('stats');return false;" href="javascript:void(0)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+      Analyses
+    </a>
+    <a class="nav-item" onclick="showPage('settings');return false;" href="javascript:void(0)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+      Paramètres
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <a class="nav-item" onclick="showPage('help');return false;" href="javascript:void(0)">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01"/></svg>
+      FAQ / Aide
+    </a>
+  </div>
+</aside>
+
+<!-- ═══ MAIN ══════════════════════════════════════════════════ -->
+<main class="main">
+
+  <!-- PAGE : MES CODES QR -->
+  <div class="page active" id="page-mycodes">
+    <div class="page-header">
+      <h1>Mes codes QR</h1>
+      <div class="header-actions">
+        <button class="btn btn-outline" onclick="openFolderModal()">
+          <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+          Nouveau dossier
+        </button>
+        <button class="btn btn-green" onclick="openCreateModal()">
+          <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          Créer un code QR
+        </button>
+      </div>
+    </div>
+
+    <!-- Dossiers -->
+    <div class="folders-title">Mes dossiers</div>
+    <div class="folders-row" id="foldersRow"></div>
+
+    <!-- Filtres -->
+    <div class="filters-bar">
+      <div class="filter-group filter-search">
+        <label>Mes codes QR</label>
+        <div class="filter-search-wrap">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path stroke-linecap="round" stroke-width="2" d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="srchInput" placeholder="Rechercher…" oninput="renderList()">
+        </div>
+      </div>
+      <div class="filter-group">
+        <label>Statut</label>
+        <select id="filtStatut" onchange="renderList()">
+          <option value="">Tous</option>
+          <option value="perm">Permanent</option>
+          <option value="temp">Temporaire</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Types de codes QR</label>
+        <select id="filtType" onchange="renderList()">
+          <option value="">Tous les types</option>
+          <option value="Image">Image</option>
+          <option value="PDF">PDF</option>
+          <option value="Word">Word</option>
+          <option value="Excel">Excel</option>
+          <option value="Vidéo">Vidéo</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Trier par</label>
+        <select id="filtSort" onchange="renderList()">
+          <option value="newest">Le plus récent</option>
+          <option value="oldest">Le plus ancien</option>
+          <option value="name">Nom A→Z</option>
+        </select>
+      </div>
+      <div class="filter-group" style="min-width:80px">
+        <label>Quantité</label>
+        <select id="filtQty" onchange="renderList()">
+          <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100">Tout</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Table -->
+    <div class="qr-table-wrap">
+      <div class="select-all-row">
+        <input type="checkbox" id="chkAll" onchange="toggleAll(this)">
+        <label for="chkAll">Tout sélectionner</label>
+      </div>
+      <div class="qr-table-head">
+        <div class="th-check"></div>
+        <div class="th-qr">QR</div>
+        <div class="th-name">Nom</div>
+        <div class="th-folder">Dossier</div>
+        <div class="th-type">Type</div>
+        <div class="th-date">Date</div>
+        <div class="th-scans">Scans</div>
+        <div class="th-preview">Aperçu</div>
+        <div class="th-actions">Actions</div>
+      </div>
+      <div id="qrListBody"></div>
+    </div>
+  </div>
+
+  <!-- PAGE : CRÉER -->
+  <div class="page" id="page-create">
+    <div class="page-header"><h1>Créer un code QR</h1></div>
+    <div style="max-width:560px">
+      <div style="background:var(--white);border:1px solid var(--border);border-radius:12px;padding:1.5rem">
+        <div class="m-tabs">
+          <button class="m-tab active" onclick="switchCreateTab('file',this)">📁 Fichier</button>
+          <button class="m-tab" onclick="switchCreateTab('url',this)">🔗 URL / Texte</button>
+        </div>
+        <div id="ct-file">
+          <div class="form-group">
+            <label>Nom du QR code</label>
+            <input type="text" id="cp-label" placeholder="ex: Contrat, Attestation…">
+          </div>
+          <div class="form-group">
+            <label>Dossier</label>
+            <select id="cp-folder"></select>
+          </div>
+          <div class="dropzone" id="cp-dz" onclick="document.getElementById('cp-fi').click()"
+            ondragover="dzO(event,'cp-dz')" ondragleave="dzL('cp-dz')" ondrop="dzD(event)">
+            <div class="dz-icon">☁️</div>
+            <div class="dz-title">Glissez votre fichier ici</div>
+            <div class="dz-sub">PNG, JPEG, PDF, Word, Excel, ZIP… tous types</div>
+            <input type="file" id="cp-fi" style="display:none" onchange="cpPickFile(this.files[0])">
+          </div>
+          <div class="file-selected" id="cp-prev" style="display:none">
+            <span class="fs-icon" id="cp-prev-icon">📄</span>
+            <span class="fs-name" id="cp-prev-name">–</span>
+            <button class="fs-rm" onclick="cpClearFile()">✕</button>
+          </div>
+          <div class="form-group" style="margin-top:1rem">
+            <label>Durée d'hébergement</label>
+            <div class="dur-row">
+              <button class="dur-opt" onclick="cpSetDur('temp',this)">
+                <span class="do">~1 heure</span><span class="ds">Usage rapide</span>
+              </button>
+              <button class="dur-opt active" onclick="cpSetDur('perm',this)">
+                <span class="do">♾ Permanent</span><span class="ds">Sans expiration</span>
+              </button>
+            </div>
+          </div>
+          <div class="prog-bar" id="cp-pb"><div class="prog-fill" id="cp-pf"></div></div>
+          <p class="m-status" id="cp-st"></p>
+          <div style="display:flex;gap:8px;margin-top:1rem">
+            <button class="btn btn-green" id="cp-btn" onclick="cpGenerate()" style="flex:1;justify-content:center;padding:10px" disabled>
+              Générer le QR Code
+            </button>
+          </div>
+        </div>
+        <div id="ct-url" style="display:none">
+          <div class="form-group">
+            <label>Nom du QR code</label>
+            <input type="text" id="cu-label" placeholder="ex: Mon site web">
+          </div>
+          <div class="form-group">
+            <label>URL ou texte à encoder</label>
+            <input type="text" id="cu-url" placeholder="https://exemple.com" oninput="document.getElementById('cu-btn').disabled=!this.value.trim()">
+          </div>
+          <button class="btn btn-green" id="cu-btn" onclick="cuGenerate()" style="width:100%;justify-content:center;padding:10px;margin-top:4px" disabled>
+            Générer le QR Code
+          </button>
+        </div>
+
+        <!-- Résultat inline -->
+        <div id="cp-result" style="display:none">
+          <div class="qr-result-wrap">
+            <div class="qr-inner"><div id="cp-qr-canvas"></div></div>
+            <div class="result-badges" id="cp-badges"></div>
+            <p class="result-note" id="cp-note"></p>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:1rem;flex-wrap:wrap">
+            <button class="btn btn-green" onclick="cpDownloadQR()" style="flex:1;justify-content:center">⬇ Télécharger QR</button>
+            <button class="btn btn-outline" onclick="cpCopyUrl()" id="cp-copy-btn" style="flex:1;justify-content:center">📋 Copier le lien</button>
+            <button class="btn btn-gray" onclick="cpReset()" style="flex:1;justify-content:center">↺ Nouveau</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PAGE : ANALYSES -->
+  <div class="page" id="page-stats">
+    <div class="page-header"><h1>Analyses</h1></div>
+    <div class="stats-grid" id="statsGrid"></div>
+    <div style="background:var(--white);border:1px solid var(--border);border-radius:10px;padding:1.5rem">
+      <h3 style="font-size:15px;font-weight:600;margin-bottom:1rem">Répartition par type</h3>
+      <div id="statsTypes"></div>
+    </div>
+  </div>
+
+  <!-- PAGE : PARAMÈTRES -->
+  <div class="page" id="page-settings">
+    <div class="page-header"><h1>Paramètres</h1></div>
+
+    <!-- Netlify config -->
+    <div class="settings-card" id="netlify-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:1rem">
+        <h3>🌐 Hébergement Netlify</h3>
+        <span id="netlify-badge" style="display:none"></span>
+      </div>
+      <p style="font-size:13px;color:var(--sub);margin-bottom:1.2rem">Tous vos fichiers (images, PDF, Word…) seront déployés sur votre site Netlify. Le QR code pointera vers l'URL Netlify — valide tant que votre token et votre site ID sont actifs.</p>
+
+      <!-- Formulaire de saisie (visible si non configuré ou si on veut changer) -->
+      <div id="netlify-form">
+        <div class="settings-row" style="margin-bottom:.8rem">
+          <label style="font-weight:600;font-size:13px">Token d'accès personnel</label>
+          <input type="password" id="s-ntoken" placeholder="nfp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off"
+            style="font-family:monospace;font-size:13px"
+            oninput="document.getElementById('netlify-validate-btn').disabled=!(this.value.trim()&&document.getElementById('s-nsiteid').value.trim())">
+          <p style="font-size:11px;color:var(--sub);margin-top:4px">Obtenir sur <a href="https://app.netlify.com/user/applications" target="_blank" style="color:var(--green)">app.netlify.com → User settings → Applications</a></p>
+        </div>
+        <div class="settings-row" style="margin-bottom:1rem">
+          <label style="font-weight:600;font-size:13px">Site ID</label>
+          <input type="text" id="s-nsiteid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"
+            style="font-family:monospace;font-size:13px"
+            oninput="document.getElementById('netlify-validate-btn').disabled=!(this.value.trim()&&document.getElementById('s-ntoken').value.trim())">
+          <p style="font-size:11px;color:var(--sub);margin-top:4px">Visible sur <a href="https://app.netlify.com" target="_blank" style="color:var(--green)">app.netlify.com → Site → Site settings → General → Site ID</a></p>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-green" id="netlify-validate-btn" onclick="netlifyValidate()" disabled style="padding:9px 22px">
+            ✅ Valider et activer
+          </button>
+          <button class="btn btn-gray" id="netlify-cancel-btn" onclick="netlifyHideForm()" style="display:none">Annuler</button>
+        </div>
+        <p class="settings-msg" id="netlify-msg" style="margin-top:.8rem"></p>
+      </div>
+
+      <!-- État actif (visible si configuré) -->
+      <div id="netlify-active" style="display:none">
+        <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:10px;padding:1rem;margin-bottom:1rem">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span style="font-size:18px">✅</span>
+            <span style="font-weight:700;font-size:14px;color:#166534">Netlify actif</span>
+          </div>
+          <p style="font-size:13px;color:#166534">Site : <strong id="netlify-site-name">–</strong></p>
+          <p style="font-size:12px;color:#4ade80;margin-top:2px" id="netlify-site-url">–</p>
+        </div>
+        <button class="btn btn-gray" onclick="netlifyShowForm()" style="font-size:13px">🔄 Changer le token / Site ID</button>
+      </div>
+    </div>
+
+    <!-- Données -->
+    <div class="settings-card">
+      <h3>🗑 Données</h3>
+      <p style="font-size:13px;color:var(--sub);margin-bottom:1rem">Supprimer tous les QR codes sauvegardés localement.</p>
+      <button class="btn btn-gray" onclick="if(confirm('Tout supprimer ?')){entries=[];folders=[];save();renderAll()}" style="border-color:var(--danger);color:var(--danger)">Effacer toutes les données</button>
+    </div>
+  </div>
+
+  <!-- PAGE : AIDE -->
+  <div class="page" id="page-help">
+    <div class="page-header"><h1>FAQ / Aide</h1></div>
+    <div style="max-width:600px">
+      <div class="settings-card">
+        <h3>Comment créer un QR code ?</h3>
+        <p style="font-size:13px;color:var(--sub);margin-top:8px;line-height:1.7">Cliquez sur "Créer un code QR" dans la barre latérale. Glissez votre fichier (image, PDF, Word…), choisissez la durée d'hébergement et cliquez sur "Générer".</p>
+      </div>
+      <div class="settings-card">
+        <h3>Quelle est la durée d'hébergement ?</h3>
+        <p style="font-size:13px;color:var(--sub);margin-top:8px;line-height:1.7"><strong>~1 heure</strong> : hébergement via tmpfiles.org, pour un partage rapide.<br><strong>Permanent ♾</strong> : déploiement sur votre site <strong>Netlify</strong>. Le QR reste valide tant que votre token Netlify est actif. Configurez votre token dans ⚙️ Paramètres.</p>
+      </div>
+      <div class="settings-card">
+        <h3>Comment configurer Netlify ?</h3>
+        <p style="font-size:13px;color:var(--sub);margin-top:8px;line-height:1.7">Allez dans <strong>⚙️ Paramètres</strong>, entrez votre <strong>Token d'accès personnel</strong> (depuis app.netlify.com → User settings → Applications) et votre <strong>Site ID</strong> (depuis Site settings → General). Cliquez sur <strong>Valider et activer</strong>. Une fois validé, tous les fichiers permanents seront déployés sur ce site.</p>
+      </div>
+      <div class="settings-card">
+        <h3>L'application est-elle gratuite ?</h3>
+        <p style="font-size:13px;color:var(--sub);margin-top:8px;line-height:1.7">Oui, totalement gratuite. Pas d'abonnement, pas de limite d'utilisation. Toutes les données sont sauvegardées localement sur votre navigateur.</p>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ═══ MODALS ════════════════════════════════════════════════ -->
+
+<!-- Nouveau dossier -->
+<div class="modal-bg" id="folderModal">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-head"><h2>Nouveau dossier</h2><button class="modal-close" onclick="closeFolderModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>Nom du dossier</label>
+        <input type="text" id="folderName" placeholder="ex: Clients, Contrats…" oninput="document.getElementById('btnAddFolder').disabled=!this.value.trim()">
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-gray" onclick="closeFolderModal()">Annuler</button>
+        <button class="btn btn-green" id="btnAddFolder" onclick="addFolder()" disabled>Créer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Détail QR -->
+<div class="modal-bg" id="detailModal">
+  <div class="modal">
+    <div class="modal-head"><h2 id="detailTitle">Détail</h2><button class="modal-close" onclick="closeDetail()">✕</button></div>
+    <div class="modal-body">
+      <div class="detail-qr-wrap">
+        <img id="detailQRImg" src="" alt="QR Code">
+      </div>
+      <div id="detailFilePreview" style="display:none;background:#f9fafb;border-radius:10px;padding:1rem;text-align:center;margin-bottom:1rem">
+        <p style="font-size:11px;color:var(--sub);margin-bottom:8px;font-weight:500;text-transform:uppercase;letter-spacing:.5px">Aperçu du contenu</p>
+        <img id="detailFileImg" src="" alt="Aperçu" style="max-width:100%;max-height:220px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:#fff" onerror="this.parentElement.style.display='none'">
+      </div>
+      <div id="detailRows"></div>
+      <div style="display:flex;gap:8px;margin-top:1rem;flex-wrap:wrap">
+        <button class="btn btn-green" onclick="detailDownloadQR()" style="flex:1;justify-content:center">⬇ Télécharger QR</button>
+        <button class="btn btn-outline" onclick="detailCopyLink()" style="flex:1;justify-content:center" id="detailCopyBtn">📋 Copier le lien</button>
+        <button class="btn btn-gray" onclick="detailView()" style="flex:1;justify-content:center">👁 Voir le fichier</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Viewer plein écran -->
+<div class="viewer-bg" id="viewerBg">
+  <div class="viewer-bar">
+    <span id="viewerTitle">–</span>
+    <button onclick="closeViewer()">✕ Fermer</button>
+  </div>
+  <div class="viewer-body" id="viewerBody"></div>
+</div>
+
+<!-- ═══ SCRIPT ════════════════════════════════════════════════ -->
+<script>
+// ─── DATA ──────────────────────────────────────────────────────
+const SK='qrm_v2';
+let entries=(()=>{try{const d=JSON.parse(localStorage.getItem(SK+'_e')||'[]');return Array.isArray(d)?d:[];}catch(e){return [];}})();
+let folders=(()=>{try{const d=JSON.parse(localStorage.getItem(SK+'_f')||'[]');return Array.isArray(d)?d:[];}catch(e){return [];}})();
+let activeFolder=null;
+let cpFile=null, cpDur='perm', cpCurUrl='', cpCurQRImg='', detailId=null;
+let cpCreateTab='file';
+
+function save(){
+  localStorage.setItem(SK+'_e',JSON.stringify(entries));
+  localStorage.setItem(SK+'_f',JSON.stringify(folders));
+}
+
+// ─── UTILS ─────────────────────────────────────────────────────
+function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
+function fmtDate(ts){return new Date(ts).toLocaleDateString('fr-FR')}
+function fmtSz(b){
+  if(!b)return '';
+  if(b<1024)return b+' o';
+  if(b<1048576)return (b/1024).toFixed(1)+' Ko';
+  return (b/1048576).toFixed(1)+' Mo';
+}
+function getEmoji(n){
+  if(!n)return '📁';
+  const e=n.split('.').pop().toLowerCase();
+  return {pdf:'📄',doc:'📝',docx:'📝',xls:'📊',xlsx:'📊',ppt:'📊',pptx:'📊',
+    png:'🖼️',jpg:'🖼️',jpeg:'🖼️',gif:'🎞️',zip:'🗜️',rar:'🗜️',
+    mp4:'🎬',mp3:'🎵',csv:'📊',txt:'📃'}[e]||'📁';
+}
+function getTypeBadge(n){
+  if(!n)return 'URL';
+  const e=n.split('.').pop().toLowerCase();
+  if(/^(png|jpg|jpeg|gif|webp|svg|bmp)$/.test(e))return 'Image';
+  if(e==='pdf')return 'PDF';
+  if(/^(doc|docx)$/.test(e))return 'Word';
+  if(/^(xls|xlsx|csv)$/.test(e))return 'Excel';
+  if(/^(ppt|pptx)$/.test(e))return 'PowerPoint';
+  if(/^(mp4|webm|mov)$/.test(e))return 'Vidéo';
+  if(/^(mp3|ogg|wav)$/.test(e))return 'Audio';
+  return e.toUpperCase()||'URL';
+}
+function isImg(n){return n&&/\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(n)}
+function isPDF(n){return n&&/\.pdf$/i.test(n)}
+function isOffice(n){return n&&/\.(doc|docx|xls|xlsx|ppt|pptx)$/i.test(n)}
+function toBase64(file){return new Promise((r,j)=>{const rd=new FileReader();rd.onload=e=>r(e.target.result);rd.onerror=j;rd.readAsDataURL(file)})}
+function genQRBase64(text){
+  return new Promise(r=>{
+    const tmp=document.createElement('div');
+    tmp.style.cssText='position:absolute;left:-9999px;visibility:hidden';
+    document.body.appendChild(tmp);
+    try {
+      new QRCode(tmp,{text,width:200,height:200,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});
+    } catch(e){ document.body.removeChild(tmp); r(''); return; }
+    // Notre lib est synchrone — le canvas est prêt immédiatement
+    const c=tmp.querySelector('canvas');
+    const b=c?c.toDataURL('image/png'):'';
+    document.body.removeChild(tmp);
+    r(b);
+  });
+}
+
+// ─── NETLIFY SETTINGS ──────────────────────────────────────────
+function loadSettings(){
+  const token=localStorage.getItem('netlify_token')||'';
+  const siteId=localStorage.getItem('netlify_siteid')||'';
+  const siteName=localStorage.getItem('netlify_sitename')||'';
+  const siteUrl=localStorage.getItem('netlify_siteurl')||'';
+  if(token && siteId){
+    netlifyShowActive(siteName,siteUrl);
+  } else {
+    netlifyShowForm(false);
+  }
+}
+
+function netlifyShowActive(name,url){
+  document.getElementById('netlify-form').style.display='none';
+  document.getElementById('netlify-active').style.display='block';
+  document.getElementById('netlify-site-name').textContent=name||'–';
+  document.getElementById('netlify-site-url').textContent=url||'';
+}
+
+function netlifyShowForm(showCancel=true){
+  document.getElementById('netlify-active').style.display='none';
+  document.getElementById('netlify-form').style.display='block';
+  document.getElementById('netlify-cancel-btn').style.display=showCancel?'':'none';
+  const token=localStorage.getItem('netlify_token')||'';
+  const siteId=localStorage.getItem('netlify_siteid')||'';
+  document.getElementById('s-ntoken').value=token;
+  document.getElementById('s-nsiteid').value=siteId;
+  document.getElementById('netlify-validate-btn').disabled=!(token&&siteId);
+  document.getElementById('netlify-msg').textContent='';
+}
+
+function netlifyHideForm(){
+  const token=localStorage.getItem('netlify_token')||'';
+  const siteId=localStorage.getItem('netlify_siteid')||'';
+  if(token&&siteId) netlifyShowActive(localStorage.getItem('netlify_sitename')||'',localStorage.getItem('netlify_siteurl')||'');
+}
+
+async function netlifyValidate(){
+  const token=document.getElementById('s-ntoken').value.trim();
+  const siteId=document.getElementById('s-nsiteid').value.trim();
+  const msg=document.getElementById('netlify-msg');
+  const btn=document.getElementById('netlify-validate-btn');
+  if(!token||!siteId){msg.className='settings-msg err';msg.textContent='⚠️ Remplissez les deux champs.';return;}
+  btn.disabled=true;btn.textContent='Vérification…';
+  msg.className='settings-msg';msg.textContent='';
+  try{
+    const r=await fetch(`https://api.netlify.com/api/v1/sites/${siteId}`,{
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'}
+    });
+    if(r.status===401){throw new Error('Token invalide ou expiré.');}
+    if(r.status===404){throw new Error('Site ID introuvable. Vérifiez l\'identifiant.');}
+    if(!r.ok){throw new Error('Erreur Netlify '+r.status);}
+    const data=await r.json();
+    const name=data.name||data.id||siteId;
+    const url=data.ssl_url||data.url||'';
+    localStorage.setItem('netlify_token',token);
+    localStorage.setItem('netlify_siteid',siteId);
+    localStorage.setItem('netlify_sitename',name);
+    localStorage.setItem('netlify_siteurl',url);
+    msg.className='settings-msg ok';msg.textContent='✅ Connexion réussie !';
+    setTimeout(()=>netlifyShowActive(name,url),800);
+  }catch(e){
+    msg.className='settings-msg err';msg.textContent='❌ '+e.message;
+  }
+  btn.disabled=false;btn.textContent='✅ Valider et activer';
+}
+
+function netlifyIsConfigured(){
+  return !!(localStorage.getItem('netlify_token')&&localStorage.getItem('netlify_siteid'));
+}
+
+// ─── UPLOAD FUNCTIONS ──────────────────────────────────────────
+// Stratégie : deploy CUMULATIF — on récupère TOUS les fichiers du
+// deploy précédent et on les réinclut à chaque nouveau deploy.
+// Ainsi aucun ancien lien ne casse jamais.
+
+async function deployToNetlify(content, filename, mimeType){
+  const token=localStorage.getItem('netlify_token');
+  const siteId=localStorage.getItem('netlify_siteid');
+  if(!token||!siteId) throw new Error('Netlify non configuré. Allez dans Paramètres.');
+
+  const path='/'+filename;
+  let bytes;
+  if(typeof content==='string'){
+    bytes=new TextEncoder().encode(content);
+  } else {
+    bytes=new Uint8Array(content);
+  }
+
+  // SHA-1 du nouveau fichier
+  const sha1New=await sha1HexBytes(bytes);
+
+  // ── Récupérer la liste des fichiers du dernier deploy publié ──
+  let existingFiles={};
+  try{
+    const rSite=await fetch(`https://api.netlify.com/api/v1/sites/${siteId}`,{
+      headers:{'Authorization':'Bearer '+token}
+    });
+    if(rSite.ok){
+      const site=await rSite.json();
+      const lastDeployId=site.published_deploy?.id;
+      if(lastDeployId){
+        const rFiles=await fetch(`https://api.netlify.com/api/v1/deploys/${lastDeployId}/files`,{
+          headers:{'Authorization':'Bearer '+token}
+        });
+        if(rFiles.ok){
+          const filesList=await rFiles.json();
+          // Construire map path→sha1 de tous les fichiers existants
+          // sauf index.html, _redirects, netlify.toml (fichiers du site lui-même)
+          const skip=new Set(['/index.html','/_redirects','/netlify.toml']);
+          filesList.forEach(f=>{
+            if(!skip.has(f.id||f.path)) existingFiles[f.id||f.path]=f.sha;
+          });
+        }
+      }
+    }
+  }catch(e){ /* pas grave, on continue sans fichiers existants */ }
+
+  // ── Construire la map complète : anciens fichiers + nouveau ──
+  const allFiles={...existingFiles, [path]:sha1New};
+
+  // ── ÉTAPE 1 : Déclarer tous les fichiers ──
+  const r1=await fetch(`https://api.netlify.com/api/v1/sites/${siteId}/deploys`,{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({files:allFiles,async:false})
+  });
+  if(!r1.ok){const t=await r1.text().catch(()=>'');throw new Error('Netlify étape 1 — '+r1.status+': '+t.substring(0,300));}
+  const deploy=await r1.json();
+
+  // ── ÉTAPE 2 : Uploader SEULEMENT les fichiers que Netlify demande ──
+  const required=deploy.required||[];
+  if(required.includes(sha1New)){
+    const r2=await fetch(`https://api.netlify.com/api/v1/deploys/${deploy.id}/files${path}`,{
+      method:'PUT',
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/octet-stream'},
+      body:bytes
+    });
+    if(!r2.ok){const t=await r2.text().catch(()=>'');throw new Error('Netlify étape 2 — '+r2.status+': '+t.substring(0,300));}
+  }
+
+  // ── ÉTAPE 3 : Attendre publication (max 60s) ──
+  let deployed=deploy;
+  for(let i=0;i<30;i++){
+    if(['ready','current','uploaded','prepared'].includes(deployed.state)) break;
+    await new Promise(r=>setTimeout(r,2000));
+    const rp=await fetch(`https://api.netlify.com/api/v1/deploys/${deploy.id}`,{
+      headers:{'Authorization':'Bearer '+token}
+    });
+    if(rp.ok) deployed=await rp.json();
+  }
+  const base=deployed.ssl_url||deployed.url||('https://'+deployed.subdomain+'.netlify.app');
+  return base+path;
+}
+
+// SHA-1 via Web Crypto API (natif, fiable à 100%)
+async function sha1HexBytes(u8){
+  const hashBuffer=await crypto.subtle.digest('SHA-1', u8);
+  return Array.from(new Uint8Array(hashBuffer)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+async function uploadFileToNetlify(file){
+  const uid2='file_'+Date.now();
+  const buf=await file.arrayBuffer();
+
+  if(isImg(file.name)){
+    // Image réelle uploadée directement — s'affiche nativement dans le navigateur
+    const ext=file.name.replace(/.*\./,'').toLowerCase();
+    const mimeMap={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml'};
+    const mime=mimeMap[ext]||file.type||'image/jpeg';
+    return await deployToNetlify(buf, uid2+'.'+ext, mime);
+
+  } else if(isPDF(file.name)){
+    // PDF réel uploadé directement — s'ouvre nativement dans le navigateur
+    return await deployToNetlify(buf, uid2+'.pdf', 'application/pdf');
+
+  } else {
+    // Office/autre : page HTML de téléchargement avec lien base64
+    const dataUrl=await toBase64(file);
+    const fname=file.name;
+    const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f4f6f8}.card{background:#fff;border-radius:16px;padding:2rem 2.5rem;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:340px;width:90%}.icon{font-size:56px;margin-bottom:1rem}.title{font-size:17px;font-weight:700;margin-bottom:.4rem;word-break:break-all}.sub{color:#6b7280;font-size:13px;margin-bottom:1.5rem}.btn{display:inline-block;padding:13px 30px;background:#00b865;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px}</style></head><body><div class="card"><div class="icon">📄</div><h2 class="title">${fname}</h2><p class="sub">Fichier prêt à télécharger</p><a href="${dataUrl}" download="${fname}" class="btn">⬇ Télécharger</a></div></body></html>`;
+    return await deployToNetlify(html, uid2+'.html', 'text/html');
+  }
+}
+
+async function uploadToTmpfiles(file){
+  const fd=new FormData();fd.append('file',file);
+  const r=await fetch('https://tmpfiles.org/api/v1/upload',{method:'POST',body:fd});
+  if(!r.ok)throw new Error('Erreur '+r.status);
+  const j=await r.json();
+  if(j.status!=='success')throw new Error('Hébergement échoué');
+  cpProg(85);
+  return j.data.url.replace('tmpfiles.org/','tmpfiles.org/dl/');
+}
+
+// ─── NAVIGATION ────────────────────────────────────────────────
+function showPage(id){
+  const validPages=['mycodes','create','stats','settings','help'];
+  if(!validPages.includes(id)) id='mycodes';
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.querySelectorAll('.nav-item')[
+    id==='mycodes'?1:id==='create'?0:id==='stats'?2:id==='settings'?3:4
+  ]?.classList.add('active');
+  // ── Mémoriser la page active pour survie à l'actualisation ──
+  try { localStorage.setItem('qrm_activePage', id); } catch(e){}
+  // ── Mettre à jour le hash de l'URL sans recharger ──
+  if(history.replaceState) history.replaceState(null,'','#'+id);
+  if(id==='mycodes')renderAll();
+  if(id==='stats')renderStats();
+  if(id==='settings')loadSettings();
+}
+
+// ─── FOLDERS ───────────────────────────────────────────────────
+function openFolderModal(){
+  document.getElementById('folderName').value='';
+  document.getElementById('btnAddFolder').disabled=true;
+  document.getElementById('folderModal').classList.add('open');
+}
+function closeFolderModal(){document.getElementById('folderModal').classList.remove('open')}
+function addFolder(){
+  const n=document.getElementById('folderName').value.trim();
+  if(!n)return;
+  folders.push({id:uid(),name:n,date:Date.now()});
+  save();
+  renderAll();
+  closeFolderModal();
+}
+function renderFolders(){
+  const sel=document.getElementById('cp-folder');
+  sel.innerHTML='<option value="">— Aucun dossier —</option>'+folders.map(f=>`<option value="${f.id}">${f.name}</option>`).join('');
+  const row=document.getElementById('foldersRow');
+  row.innerHTML=`
+    <div class="folder-card folder-new" onclick="openFolderModal()">
+      <div class="fc-icon">📁+</div>
+      <div class="fc-name" style="color:var(--green)">Nouveau dossier</div>
+      <div class="fc-count">&nbsp;</div>
+    </div>
+    ${folders.map(f=>`
+      <div class="folder-card${activeFolder===f.id?' active-folder':''}" onclick="toggleFolder('${f.id}')">
+        <div class="fc-icon">📁</div>
+        <div class="fc-name">${f.name}</div>
+        <div class="fc-count">${entries.filter(e=>e.folderId===f.id).length} QR</div>
+      </div>
+    `).join('')}
+  `;
+}
+function toggleFolder(id){
+  activeFolder=activeFolder===id?null:id;
+  renderAll();
+}
+
+// ─── LIST ──────────────────────────────────────────────────────
+function renderList(){
+  const q=(document.getElementById('srchInput').value||'').toLowerCase();
+  const stat=document.getElementById('filtStatut').value;
+  const type=document.getElementById('filtType').value;
+  const sort=document.getElementById('filtSort').value;
+  const qty=parseInt(document.getElementById('filtQty').value)||10;
+  let list=[...entries];
+  if(activeFolder)list=list.filter(e=>e.folderId===activeFolder);
+  if(q)list=list.filter(e=>e.label.toLowerCase().includes(q)||e.fileName?.toLowerCase().includes(q));
+  if(stat)list=list.filter(e=>e.hosting===stat);
+  if(type)list=list.filter(e=>e.fileType===type);
+  if(sort==='newest')list.sort((a,b)=>b.date-a.date);
+  else if(sort==='oldest')list.sort((a,b)=>a.date-b.date);
+  else list.sort((a,b)=>a.label.localeCompare(b.label));
+  list=list.slice(0,qty===100?9999:qty);
+
+  const body=document.getElementById('qrListBody');
+  if(!list.length){
+    body.innerHTML=`<div class="empty-list"><div class="ei">🔲</div><h3>${q?'Aucun résultat':'Aucun code QR'}</h3><p>${q?'Essayez un autre terme.':'Cliquez sur "Créer un code QR" pour commencer.'}</p></div>`;
+    return;
+  }
+  // Build list entries map for quick lookup after render
+  const _imgMap={};
+  list.forEach(e=>{ if(isImg(e.fileName)&&(e.rawImageData||e.viewUrl)) _imgMap[e.id]=e.rawImageData||e.viewUrl; });
+  body.innerHTML=list.map(e=>{
+    const folder=folders.find(f=>f.id===e.folderId);
+    // Preview cell: image thumbnail if image, else emoji icon
+    let previewCell;
+    if(isImg(e.fileName)){
+      previewCell=`<img class="preview-thumb" data-imgid="${e.id}" alt="Aperçu" onclick="openViewer(entries.find(x=>x.id==='${e.id}'))" title="Voir l'aperçu">`;
+    } else {
+      previewCell=`<div class="preview-icon" onclick="openViewer(entries.find(x=>x.id==='${e.id}'))" title="Voir le fichier">${getEmoji(e.fileName)}</div>`;
+    }
+    return `<div class="qr-row">
+      <div class="th-check"><input type="checkbox" class="row-chk" data-id="${e.id}"></div>
+      <div class="th-qr">
+        ${e.qrImage
+          ?`<img class="qr-thumb" src="${e.qrImage}" alt="QR" onclick="openDetail('${e.id}')">`
+          :`<div class="qr-thumb-empty">🔲</div>`}
+      </div>
+      <div class="th-name">
+        <div class="qr-name">${e.label}</div>
+        <a class="qr-url" href="${e.viewUrl||e.rawUrl||'#'}" target="_blank">${(e.viewUrl||e.rawUrl||'–').substring(0,45)}${(e.viewUrl||e.rawUrl||'').length>45?'…':''}</a>
+      </div>
+      <div class="th-folder">
+        <span>📁</span>${folder?folder.name:'<span style="color:#d1d5db">Aucun dossier</span>'}
+      </div>
+      <div class="th-type"><span class="type-badge">${getEmoji(e.fileName)} ${e.fileType||'URL'}</span></div>
+      <div class="th-date">${fmtDate(e.date)}</div>
+      <div class="th-scans"><span class="scan-count">0</span></div>
+      <div class="th-preview">${previewCell}</div>
+      <div class="th-actions">
+        <button class="act-btn primary" onclick="openDetail('${e.id}')">Détail</button>
+        <button class="act-btn" onclick="dlQR('${e.id}')">⬇ QR</button>
+        <button class="act-btn danger" onclick="delEntry('${e.id}')">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+  // Assign image src after DOM is built to safely handle base64 data URLs
+  body.querySelectorAll('img[data-imgid]').forEach(img=>{
+    const src=_imgMap[img.dataset.imgid];
+    if(src) img.src=src;
+  });
+  // Régénérer les QR manquants en arrière-plan
+  list.forEach(async e=>{
+    if(!e.qrImage&&(e.viewUrl||e.rawUrl)){
+      const url=e.viewUrl||e.rawUrl;
+      const b64=await genQRBase64(url);
+      if(b64){
+        e.qrImage=b64;
+        save();
+        // Mettre à jour l'image dans le DOM si elle est encore là
+        const row=body.querySelector(`[onclick*="openDetail('${e.id}')"]`);
+        if(row){
+          const wrap=row.closest('.th-qr');
+          if(wrap) wrap.innerHTML=`<img class="qr-thumb" src="${b64}" alt="QR" onclick="openDetail('${e.id}')">`;
+        }
+      }
+    }
+  });
+}
+function renderAll(){renderFolders();renderList();}
+function toggleAll(chk){document.querySelectorAll('.row-chk').forEach(c=>c.checked=chk.checked)}
+
+// ─── STATS ─────────────────────────────────────────────────────
+function renderStats(){
+  const g=document.getElementById('statsGrid');
+  const types={};entries.forEach(e=>{types[e.fileType||'URL']=(types[e.fileType||'URL']||0)+1});
+  g.innerHTML=`
+    <div class="stat-card"><div class="sv">${entries.length}</div><div class="sl">Total QR Codes</div></div>
+    <div class="stat-card"><div class="sv">${entries.filter(e=>e.hosting==='perm').length}</div><div class="sl">Permanents</div></div>
+    <div class="stat-card"><div class="sv">${entries.filter(e=>e.hosting==='temp').length}</div><div class="sl">Temporaires</div></div>
+    <div class="stat-card"><div class="sv">${folders.length}</div><div class="sl">Dossiers</div></div>
+  `;
+  const t=document.getElementById('statsTypes');
+  if(!Object.keys(types).length){t.innerHTML='<p style="color:var(--sub);font-size:13px">Aucune donnée.</p>';return;}
+  const max=Math.max(...Object.values(types));
+  t.innerHTML=Object.entries(types).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <span style="width:80px;font-size:13px;font-weight:500">${k}</span>
+      <div style="flex:1;height:10px;background:#e5e7eb;border-radius:10px;overflow:hidden">
+        <div style="width:${Math.round(v/max*100)}%;height:100%;background:var(--green);border-radius:10px"></div>
+      </div>
+      <span style="font-size:13px;font-weight:600;min-width:24px;text-align:right">${v}</span>
+    </div>
+  `).join('');
+}
+
+// ─── CREATE PAGE ────────────────────────────────────────────────
+function switchCreateTab(t,btn){
+  cpCreateTab=t;
+  document.getElementById('ct-file').style.display=t==='file'?'block':'none';
+  document.getElementById('ct-url').style.display=t==='url'?'block':'none';
+  document.querySelectorAll('.m-tab').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('cp-result').style.display='none';
+}
+function dzO(e,id){e.preventDefault();document.getElementById(id).classList.add('over')}
+function dzL(id){document.getElementById(id).classList.remove('over')}
+function dzD(e){e.preventDefault();dzL('cp-dz');if(e.dataTransfer.files[0])cpPickFile(e.dataTransfer.files[0])}
+function cpPickFile(f){
+  cpFile=f;
+  document.getElementById('cp-prev').style.display='flex';
+  document.getElementById('cp-prev-name').textContent=f.name;
+  document.getElementById('cp-prev-icon').textContent=getEmoji(f.name);
+  if(!document.getElementById('cp-label').value)
+    document.getElementById('cp-label').value=f.name.replace(/\.[^/.]+$/,'');
+  document.getElementById('cp-btn').disabled=false;
+  document.getElementById('cp-result').style.display='none';
+}
+function cpClearFile(){
+  cpFile=null;
+  document.getElementById('cp-prev').style.display='none';
+  document.getElementById('cp-fi').value='';
+  document.getElementById('cp-btn').disabled=true;
+  document.getElementById('cp-result').style.display='none';
+}
+function cpSetDur(v,btn){
+  cpDur=v;
+  document.querySelectorAll('.dur-opt').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function cpProg(p){document.getElementById('cp-pf').style.width=p+'%'}
+
+async function cpGenerate(){
+  if(!cpFile)return;
+  const btn=document.getElementById('cp-btn');
+  const st=document.getElementById('cp-st');
+  btn.disabled=true;
+  document.getElementById('cp-pb').style.display='block';
+  cpProg(10);
+  st.className='m-status';st.textContent='Traitement en cours…';
+  document.getElementById('cp-result').style.display='none';
+  try{
+    let viewUrl, durBadge, durNote;
+    let rawImageData='';
+    if(isImg(cpFile.name)){
+      const dataUrl=await toBase64(cpFile);
+      rawImageData=dataUrl;
+      cpProg(20);
+    }
+    if(cpDur==='perm'){
+      if(!netlifyIsConfigured()) throw new Error('Netlify non configuré. Allez dans ⚙️ Paramètres pour entrer votre token et Site ID.');
+      st.textContent='Déploiement sur Netlify…';
+      cpProg(35);
+      viewUrl=await uploadFileToNetlify(cpFile);
+      durBadge={t:'♾ Permanent',c:'green'};
+      durNote='Fichier hébergé sur Netlify. QR valide tant que votre token est actif.';
+    } else {
+      st.textContent='Upload temporaire…';
+      cpProg(35);
+      const raw=await uploadToTmpfiles(cpFile);
+      viewUrl=isOffice(cpFile.name)?'https://docs.google.com/viewer?url='+encodeURIComponent(raw):raw;
+      durBadge={t:'~1 heure',c:'orange'};
+      durNote='Lien expire dans ~1 heure (tmpfiles.org).';
+    }
+    cpProg(90);
+    st.textContent='Génération du QR…';
+    const wrap=document.getElementById('cp-qr-canvas');
+    wrap.innerHTML='';
+    new QRCode(wrap,{text:viewUrl,width:200,height:200,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});
+    await new Promise(r=>setTimeout(r,300));
+    const canvas=wrap.querySelector('canvas');
+    cpCurQRImg=canvas?canvas.toDataURL('image/png'):'';
+    cpCurUrl=viewUrl;
+    const bdg=document.getElementById('cp-badges');
+    let tb=isImg(cpFile.name)?'Image':isPDF(cpFile.name)?'PDF':isOffice(cpFile.name)?'Document':'Fichier';
+    let host=cpDur==='perm'?'Netlify':'tmpfiles';
+    bdg.innerHTML=`<span class="rb blue">${tb}</span><span class="rb ${durBadge.c}">${durBadge.t}</span><span class="rb" style="background:#e0e7ff;color:#3730a3">${host}</span>`;
+    document.getElementById('cp-note').textContent=durNote;
+    cpProg(100);
+    setTimeout(()=>{document.getElementById('cp-pb').style.display='none';},400);
+    st.textContent='';
+    document.getElementById('cp-result').style.display='block';
+    // Sauvegarder
+    const label=document.getElementById('cp-label').value.trim()||cpFile.name.replace(/\.[^/.]+$/,'');
+    const folderId=document.getElementById('cp-folder').value||null;
+    entries.unshift({
+      id:uid(),label,qrImage:cpCurQRImg,rawUrl:viewUrl,viewUrl,
+      rawImageData,
+      fileName:cpFile.name,fileSize:cpFile.size,fileType:getTypeBadge(cpFile.name),
+      folderId,hosting:cpDur,date:Date.now()
+    });
+    save();
+    btn.disabled=false;
+  } catch(err){
+    cpProg(0);document.getElementById('cp-pb').style.display='none';
+    st.className='m-status err';st.textContent='❌ '+err.message;
+    btn.disabled=false;
+  }
+}
+
+async function cuGenerate(){
+  const val=document.getElementById('cu-url').value.trim();
+  const label=document.getElementById('cu-label').value.trim()||val.substring(0,30);
+  if(!val)return;
+  document.getElementById('cp-result').style.display='none';
+  const qrImg=await genQRBase64(val);
+  const wrap=document.getElementById('cp-qr-canvas');
+  wrap.innerHTML='';
+  new QRCode(wrap,{text:val,width:200,height:200,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.H});
+  cpCurUrl=val;cpCurQRImg=qrImg;
+  document.getElementById('cp-badges').innerHTML=`<span class="rb blue">Lien direct</span>`;
+  document.getElementById('cp-note').textContent='';
+  document.getElementById('cp-result').style.display='block';
+  entries.unshift({id:uid(),label,qrImage:qrImg,rawUrl:val,viewUrl:val,fileName:'',fileSize:0,fileType:'URL',folderId:null,hosting:'perm',date:Date.now()});
+  save();
+}
+
+function cpDownloadQR(){
+  if(!cpCurQRImg)return;
+  const a=document.createElement('a');a.download='qrcode.png';a.href=cpCurQRImg;a.click();
+}
+function cpCopyUrl(){
+  navigator.clipboard.writeText(cpCurUrl).then(()=>{
+    const b=document.getElementById('cp-copy-btn');b.textContent='✅ Copié !';
+    setTimeout(()=>{b.textContent='📋 Copier le lien';},2000);
+  });
+}
+function cpReset(){
+  cpClearFile();
+  document.getElementById('cp-label').value='';
+  document.getElementById('cu-url').value='';
+  document.getElementById('cu-label').value='';
+  document.getElementById('cu-btn').disabled=true;
+  document.getElementById('cp-result').style.display='none';
+  document.getElementById('cp-st').textContent='';
+}
+
+// ─── CREATE MODAL (from mycodes page) ──────────────────────────
+function openCreateModal(){showPage('create')}
+
+// ─── DETAIL ────────────────────────────────────────────────────
+async function openDetail(id){
+  const e=entries.find(x=>x.id===id);
+  if(!e)return;
+  detailId=id;
+  document.getElementById('detailTitle').textContent=e.label;
+  // Si qrImage absent, le régénérer maintenant
+  const imgEl=document.getElementById('detailQRImg');
+  if(e.qrImage){
+    imgEl.src=e.qrImage;
+  } else {
+    const url=e.viewUrl||e.rawUrl||'';
+    imgEl.src='';
+    imgEl.alt='Génération…';
+    if(url){
+      const b64=await genQRBase64(url);
+      if(b64){
+        e.qrImage=b64;
+        save();
+        imgEl.src=b64;
+        // Mettre à jour aussi la thumbnail dans la liste
+        document.querySelectorAll('.qr-thumb').forEach(t=>{
+          if(t.closest('.qr-row')&&t.onclick&&t.getAttribute('onclick')&&t.getAttribute('onclick').includes(id)){
+            t.src=b64;
+          }
+        });
+      }
+    }
+    imgEl.alt='QR Code';
+  }
+  // File preview
+  const prevWrap=document.getElementById('detailFilePreview');
+  const prevImg=document.getElementById('detailFileImg');
+  if(isImg(e.fileName) && (e.rawImageData||e.viewUrl)){
+    prevImg.src=e.rawImageData||e.viewUrl;
+    prevWrap.style.display='block';
+  } else {
+    prevWrap.style.display='none';
+    prevImg.src='';
+  }
+  const folder=folders.find(f=>f.id===e.folderId);
+  document.getElementById('detailRows').innerHTML=`
+    <div class="detail-row"><span class="lbl">Nom</span><span class="val">${e.label}</span></div>
+    <div class="detail-row"><span class="lbl">Fichier</span><span class="val">${e.fileName||'–'}</span></div>
+    <div class="detail-row"><span class="lbl">Type</span><span class="val">${e.fileType||'–'}</span></div>
+    <div class="detail-row"><span class="lbl">Dossier</span><span class="val">${folder?folder.name:'Aucun'}</span></div>
+    <div class="detail-row"><span class="lbl">Hébergement</span><span class="val">${e.hosting==='perm'?'♾ Permanent':'⏱ ~1 heure'}</span></div>
+    <div class="detail-row"><span class="lbl">Date</span><span class="val">${fmtDate(e.date)}</span></div>
+    <div class="detail-row"><span class="lbl">Lien</span><span class="val"><a href="${e.viewUrl||e.rawUrl||'#'}" target="_blank" style="color:var(--green)">${(e.viewUrl||e.rawUrl||'–').substring(0,60)}…</a></span></div>
+  `;
+  document.getElementById('detailModal').classList.add('open');
+}
+function closeDetail(){document.getElementById('detailModal').classList.remove('open')}
+async function detailDownloadQR(){
+  const e=entries.find(x=>x.id===detailId);
+  if(!e)return;
+  let img=e.qrImage;
+  if(!img){
+    const url=e.viewUrl||e.rawUrl||'';
+    if(!url)return;
+    img=await genQRBase64(url);
+    if(img){e.qrImage=img;save();document.getElementById('detailQRImg').src=img;}
+  }
+  if(!img)return;
+  const a=document.createElement('a');a.download='qr-'+e.label+'.png';a.href=img;a.click();
+}
+function detailCopyLink(){
+  const e=entries.find(x=>x.id===detailId);
+  if(!e)return;
+  navigator.clipboard.writeText(e.viewUrl||e.rawUrl||'').then(()=>{
+    const b=document.getElementById('detailCopyBtn');b.textContent='✅ Copié !';
+    setTimeout(()=>{b.textContent='📋 Copier le lien';},2000);
+  });
+}
+function detailView(){
+  const e=entries.find(x=>x.id===detailId);
+  if(!e)return;
+  closeDetail();
+  openViewer(e);
+}
+
+// ─── ACTIONS ───────────────────────────────────────────────────
+async function dlQR(id){
+  const e=entries.find(x=>x.id===id);
+  if(!e)return;
+  let img=e.qrImage;
+  if(!img){
+    const url=e.viewUrl||e.rawUrl||'';
+    if(!url)return;
+    img=await genQRBase64(url);
+    if(img){e.qrImage=img;save();}
+  }
+  if(!img)return;
+  const a=document.createElement('a');a.download='qr-'+e.label+'.png';a.href=img;a.click();
+}
+function delEntry(id){
+  if(!confirm('Supprimer ce QR code ?'))return;
+  entries=entries.filter(x=>x.id!==id);save();renderList();
+}
+
+// ─── VIEWER ────────────────────────────────────────────────────
+function openViewer(e){
+  const body=document.getElementById('viewerBody');
+  body.innerHTML='';
+  document.getElementById('viewerTitle').textContent=e.label+(e.fileName?' — '+e.fileName:'');
+  const url=e.rawUrl||e.viewUrl||'';
+  if(isImg(e.fileName)){
+    const img=document.createElement('img');img.src=e.rawImageData||url;
+    img.onerror=()=>{body.innerHTML=`<div style="color:#fff;text-align:center"><div style="font-size:48px;margin-bottom:1rem">🖼️</div><p style="margin-bottom:12px">${e.fileName}</p><a href="${url}" target="_blank" style="color:#90caf9">Ouvrir →</a></div>`};
+    body.appendChild(img);
+  } else if(isPDF(e.fileName)){
+    const fr=document.createElement('iframe');fr.src=url;fr.style.cssText='width:100%;height:100%;border:none;background:#fff';body.appendChild(fr);
+  } else if(isOffice(e.fileName)){
+    const fr=document.createElement('iframe');
+    fr.src='https://docs.google.com/viewer?url='+encodeURIComponent(url)+'&embedded=true';
+    fr.style.cssText='width:100%;height:100%;border:none;background:#fff';body.appendChild(fr);
+  } else {
+    body.innerHTML=`<div style="color:#fff;text-align:center;padding:2rem"><div style="font-size:64px;margin-bottom:1rem">${getEmoji(e.fileName)}</div><div style="font-size:16px;margin-bottom:1rem">${e.label}</div><a href="${url}" target="_blank" style="color:#90caf9;font-size:15px">Ouvrir / Télécharger →</a></div>`;
+  }
+  document.getElementById('viewerBg').classList.add('open');
+}
+function closeViewer(){
+  document.getElementById('viewerBg').classList.remove('open');
+  document.getElementById('viewerBody').innerHTML='';
+}
+
+// ─── INIT ──────────────────────────────────────────────────────
+(function(){
+  // Réparation automatique des données corrompues
+  if (!Array.isArray(entries)) { entries = []; try{localStorage.setItem(SK+'_e','[]');}catch(e){} }
+  if (!Array.isArray(folders)) { folders = []; try{localStorage.setItem(SK+'_f','[]');}catch(e){} }
+
+  // Restaurer la dernière page active (survie à l'actualisation)
+  const validPages = ['mycodes','create','stats','settings','help'];
+  let activePage = 'mycodes';
+  // Priorité 1 : hash dans l'URL (#create, #stats, etc.)
+  const hash = window.location.hash.replace('#','');
+  if(validPages.includes(hash)) activePage = hash;
+  // Priorité 2 : page mémorisée dans localStorage
+  else {
+    try {
+      const saved = localStorage.getItem('qrm_activePage');
+      if(saved && validPages.includes(saved)) activePage = saved;
+    } catch(e){}
+  }
+
+  try {
+    loadSettings();
+    showPage(activePage);
+  } catch(initErr) {
+    console.error('Init error:', initErr);
+    entries = []; folders = [];
+    try { showPage('mycodes'); } catch(e) {}
+  }
+})();
+</script>
+</body>
+</html>
